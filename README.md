@@ -4,13 +4,14 @@ Run **Start exhibit.cmd** to open the controller. Dependencies are installed on 
 On another Windows laptop, install Python 3.11 or newer and run **Setup.cmd** first.
 
 1. Connect the microphone, speaker(s), and USB button. Click **Refresh connected devices**.
-2. Choose the microphone and select your speaker outputs. This PC currently has a
-   **Microphone (CMTECK)** and **Speakers (USB2.0 Device)**.
-3. Choose the three audio files. Use **Move up/down** to set their order.
+2. Choose the microphone. In each numbered row, choose one audio file and the output
+   that should play it. Set unused rows to **Off** (for example, when testing one speaker).
+3. Set the playback echo amount and delay. Start with 35% / 350 ms, or use 0% for no echo.
+   Echo, volume, file selections, and speaker assignments all update while playing.
 4. Click **Detect my button**, release all keys, wait two seconds, and hold the physical
    button until its key code appears. Then release it.
 5. Click **Start exhibit**. Minimize the window to leave it running in the background.
-6. Hold the button to record. Release it to save a new WAV in `recordings/`.
+6. Hold the button, wait half a second, then speak. Release it to save a new WAV in `recordings/`.
    The playlist keeps playing throughout. Recording voices does not add them to the playlist.
 7. Click **Stop and save** or close the window to finish any active recording and stop playback.
 
@@ -24,17 +25,39 @@ No automatic startup is installed.
 
 ## Audio routing
 
-The playlist plays file 1, then file 2, then file 3, then repeats. One or more files are
-allowed for testing. WAV, MP3, FLAC, OGG, MP4, M4A, and AAC are supported. MP4 video is
+Each enabled row loops its own file independently on its assigned speaker. Outputs start
+together approximately; a shorter file repeats without waiting for the other files.
+One to three outputs can be enabled. WAV, MP3, FLAC, OGG, MP4, M4A, and AAC are supported. MP4 video is
 ignored and its audio is decoded using bundled FFmpeg. Files in `audio/` are discovered
 automatically on first launch.
 Mono files are duplicated to stereo, and files are converted to 48 kHz for playback.
+Each playback file is automatically peak-normalized toward -1 dBFS with a maximum
+30 dB boost before echo is applied. This makes quiet source files louder while retaining
+their dynamics and stereo balance. Silence remains silent. Normalization happens in
+memory on Start and live file changes; source files and microphone recordings are unchanged.
 Playback starts at 50% volume. Recordings use the mic's native sample rate, mono, 16-bit WAV.
 
-For synchronized sound on all three speakers, connect them to **one physical audio output**
-using a suitable splitter/distribution amplifier or the speakers' supported wired linking.
-Select that one output in the app. Separate Windows outputs are also supported, but startup
-alignment is approximate and independent device clocks can drift. Bluetooth adds latency.
+Each speaker needs a separate Windows audio output. A splitter duplicates the same signal
+and cannot provide three different files. This version routes to separate Windows endpoints;
+individual channels on a multichannel audio interface are not yet selectable. Independent
+device clocks can drift and Bluetooth adds latency; sample-accurate synchronization is not guaranteed.
+
+Choose a different file or speaker while running to change its assignment. Selecting one
+already used in another row swaps those two assignments. Each active file and speaker can
+appear only once; equivalent file paths are also treated as duplicates. At least one row
+must remain enabled. New files decode in the background. Wait for the loading message to
+finish before making another routing change. A failed change retains the previous routes.
+Unchanged speakers keep playing, and the microphone recording stream is not restarted.
+Changed files begin near their start; opening a different hardware output can add a short
+delay. Assignments are saved when the controller is stopped or closed.
+
+Echo applies only to the playback files. Amount controls the strength of three decaying
+repeats, and delay controls their spacing (50–1500 ms). Adjust either slider while playing;
+changes crossfade over 50 ms without restarting loops or recording. Settings are saved
+when you stop or close the controller. The echoes wrap across each file's
+loop boundary, preserving its original duration. This produces an already-established echo
+on the first loop as well. Mixing includes volume headroom and output clipping protection.
+Original audio files and microphone recordings are not modified by the echo.
 
 ## Button and recording behavior
 
@@ -47,8 +70,11 @@ Mouse-only, serial, game-controller, or custom HID buttons need a different inpu
 Their exact protocol must be identified before use. A button that only sends a brief tap
 cannot support physical hold duration in this mode.
 
-The microphone stream stays open for quick response, but audio is only written while the
-button is held. The capture boundary is approximate (10 ms key polling plus audio buffering).
+The microphone stream stays open for quick response. The first 0.5 seconds of captured
+audio after each press is discarded to exclude the button click. Speak after this short
+delay; the window shows HOLD during the delay and RECORDING afterward. A press shorter
+than half a second creates no saved recording. Release ends recording immediately.
+The capture boundary is approximate (10 ms key polling plus audio buffering).
 No live microphone monitoring is enabled. Ambient speaker audio may still enter the mic.
 Recordings are named `1 - (15-23-10).wav`, `2 - (15-24-02).wav`, and so on. The time
 is the local 24-hour time when the button was pressed (hours-minutes-seconds); Windows

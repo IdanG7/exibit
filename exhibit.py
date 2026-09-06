@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future
 import ctypes
 import json
 import logging
@@ -42,8 +43,16 @@ def validate_config(config):
         values = config.get(field)
         if not isinstance(values, list) or not values or not all(isinstance(v, str) and v for v in values):
             raise ValueError(f'Select at least one {"speaker" if field == "speakers" else "audio file"}.')
-        if len(set(values)) != len(values):
-            raise ValueError(f'Remove duplicate {field}.')
+        identities = [os.path.normcase(str(Path(v).resolve())) if field == 'files' else v.casefold() for v in values]
+        if len(set(identities)) != len(values):
+            raise ValueError('Each file can be assigned only once.' if field == 'files'
+                             else 'Each speaker can be assigned only once.')
+    if len(config['speakers']) != len(config['files']):
+        raise ValueError('Assign exactly one audio file to each enabled speaker.')
+    for name, default, low, high in [('echo_amount', .35, 0, .75), ('echo_delay_ms', 350, 50, 1500)]:
+        value = config.get(name, default)
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or not low <= value <= high:
+            raise ValueError(f'{name} must be between {low} and {high}.')
     key = config.get('button_vk')
     if type(key) is not int or not 1 <= key <= 254:
         raise ValueError('Detect the button again.')
@@ -82,6 +91,14 @@ def load_gui_config(path=CONFIG):
         level = config.get('volume', .5)
         if not isinstance(level, (int, float)) or not math.isfinite(level) or not 0 <= level <= 1:
             config['volume'] = .5
+        for field, default, low, high in [('echo_amount', .35, 0, .75), ('echo_delay_ms', 350, 50, 1500)]:
+            value = config.get(field, default)
+            if field in config and (not isinstance(value, (int, float)) or not math.isfinite(value) or not low <= value <= high):
+                config[field] = default
+        if 'routing_rows' in config and (not isinstance(config['routing_rows'], list)
+                or not all(isinstance(row, dict) and isinstance(row.get('file'), str)
+                           and isinstance(row.get('output'), str) for row in config['routing_rows'])):
+            config.pop('routing_rows')
         return config
     except (ValueError, OSError) as exc:
         logging.error('Could not read settings; opening setup. Original file retained: %s', exc)
@@ -107,7 +124,16 @@ def resolve(name, kind):
     return matches[0]
 
 
-def load_playlist(paths, rate=RATE):
+def normalize_playback(audio):
+    """Raise quiet playback to -1 dBFS peak, with at most 30 dB of gain."""
+    peak = float(np.max(np.abs(audio)))
+    if peak == 0:
+        return audio
+    gain = min(10 ** (30 / 20), 10 ** (-1 / 20) / peak)
+    return (audio * gain).astype('float32')
+
+
+def load_playlist(paths, rate=RATE, separate=False, normalize=False):
     tracks = []
     total_bytes = 0
     for path in paths:
@@ -143,15 +169,71 @@ def load_playlist(paths, rate=RATE):
         total_bytes += data.nbytes
         if total_bytes > MAX_PLAYLIST_BYTES:
             raise ValueError('Playlist is too large to load safely (256 MB decoded limit). Use shorter audio files.')
-        tracks.append(data)
+        tracks.append(normalize_playback(data) if normalize else data)
     if not tracks:
         raise ValueError('Choose at least one audio file first.')
-    return np.concatenate(tracks)
+    return tracks if separate else np.concatenate(tracks)
+
+
+def apply_echo(audio, amount=.35, delay_ms=350, rate=RATE):
+    """Three decaying repeats across loop boundaries, with headroom against clipping."""
+    if amount == 0:
+        return audio
+    delay = max(1, round(rate * delay_ms / 1000))
+    result = audio.copy()
+    gain = 1.0
+    for repeat in range(1, 4):
+        weight = amount ** repeat
+        result += weight * np.roll(audio, repeat * delay, axis=0)
+        gain += weight
+    result /= gain
+    return result
 
 
 def loop_block(audio, position, frames):
     indexes = (np.arange(frames) + position) % len(audio)
     return audio[indexes], (position + frames) % len(audio)
+
+
+class LiveEcho:
+    """Render echo from the looping source, crossfading parameter changes over 50 ms."""
+    def __init__(self, audio, amount=.35, delay_ms=350, rate=RATE):
+        self.audio = audio
+        self.rate = rate
+        self.current = (amount, delay_ms)
+        self.target = None
+        self.fade_position = 0
+        self.fade_frames = max(1, round(rate * .05))
+
+    def _block(self, position, frames, settings):
+        amount, delay_ms = settings
+        result, _ = loop_block(self.audio, position, frames)
+        if amount:
+            delay = max(1, round(self.rate * delay_ms / 1000))
+            gain = 1.0
+            for repeat in range(1, 4):
+                weight = amount ** repeat
+                delayed, _ = loop_block(self.audio, position - delay * repeat, frames)
+                result += weight * delayed
+                gain += weight
+            result /= gain
+        return result
+
+    def render(self, position, frames, amount, delay_ms):
+        requested = (amount, delay_ms)
+        if self.target is None and requested != self.current:
+            self.target = requested
+            self.fade_position = 0
+        result = self._block(position, frames, self.current)
+        if self.target is not None:
+            updated = self._block(position, frames, self.target)
+            blend = np.minimum((np.arange(frames) + self.fade_position + 1) / self.fade_frames, 1)[:, None]
+            result = (result * (1 - blend) + updated * blend).astype('float32')
+            self.fade_position += frames
+            if self.fade_position >= self.fade_frames:
+                self.current = self.target
+                self.target = None
+        return result
 
 
 def show_existing_controller():
@@ -177,12 +259,14 @@ def show_existing_controller():
 
 class Recorder:
     """Ordered disk worker; no file writes occur in the audio callback."""
-    def __init__(self, folder, rate, max_seconds=600):
+    def __init__(self, folder, rate, max_seconds=600, start_delay_seconds=0):
         self.folder = Path(folder)
         self.folder.mkdir(parents=True, exist_ok=True)
         check_disk(self.folder)
         self.rate = rate
         self.max_frames = int(rate * max_seconds)
+        self.start_delay_frames = round(rate * start_delay_seconds)
+        self.skip_frames = 0
         self.frames = 0
         self.active = False
         self.lock = threading.Lock()
@@ -210,6 +294,7 @@ class Recorder:
         with self.lock:
             if not self.active and not self.error and not self.closed:
                 self.frames = 0
+                self.skip_frames = self.start_delay_frames
                 self._put(('start', datetime.now()))
                 self.active = self.error is None
 
@@ -236,6 +321,11 @@ class Recorder:
                     self._put(('end', None))
                     return
                 remaining = self.max_frames - self.frames
+                skipped = min(self.skip_frames, len(data))
+                self.skip_frames -= skipped
+                data = data[skipped:]
+                if not len(data):
+                    return
                 chunk = data[:remaining].copy()
                 self._put(('audio', chunk))
                 self.frames += len(chunk)
@@ -330,6 +420,7 @@ class Engine:
         self.reported_warnings = 0
         self.last_warning = 0
         self.output_heartbeats = []
+        self.routes = {}
 
     def start(self):
         try:
@@ -338,26 +429,33 @@ class Engine:
             outputs = [resolve(name, 'output') for name in self.config['speakers']]
             if not outputs:
                 raise ValueError('Select at least one speaker.')
-            audio = load_playlist(self.config['files'])
+            tracks = load_playlist(self.config['files'], separate=True, normalize=True)
             mic_rate = int(mic['default_samplerate'])
             sd.check_input_settings(device=mic_id, channels=1, samplerate=mic_rate)
             for device_id, device in outputs:
                 channels = min(2, device['max_output_channels'])
                 sd.check_output_settings(device=device_id, channels=channels, samplerate=RATE)
-            self.recorder = Recorder(ROOT / 'recordings', mic_rate)
+            self.recorder = Recorder(ROOT / 'recordings', mic_rate, start_delay_seconds=.5)
             mic_stream = sd.InputStream(device=mic_id, samplerate=mic_rate, channels=1,
                                         dtype='float32', blocksize=480, callback=self.recorder.callback)
             self.streams.append(mic_stream)
-            for device_id, device in outputs:
+            for (device_id, device), audio in zip(outputs, tracks):
+                index = len(self.routes)
+                name = self.config['speakers'][index]
                 channels = min(2, device['max_output_channels'])
+                route = dict(file=self.config['files'][index], callback=self._playback(audio, channels), channels=channels)
                 stream = sd.OutputStream(device=device_id, samplerate=RATE, channels=channels,
-                                         dtype='float32', callback=self._playback(audio, channels))
+                                         dtype='float32', callback=lambda *args, slot=route: slot['callback'](*args))
+                route['stream'] = stream
+                self.routes[name] = route
                 self.streams.append(stream)
             self.epoch = time.monotonic() + 0.5
             for stream in self.streams:
                 stream.start()
             ctypes.windll.kernel32.SetThreadExecutionState(0x80000003)
-            logging.info('Exhibit started: %s', self.config['speakers'])
+            logging.info('Exhibit started with independent loops: %s; echo=%s, delay=%s ms',
+                         list(zip(self.config['speakers'], self.config['files'])),
+                         self.config.get('echo_amount', .35), self.config.get('echo_delay_ms', 350))
         except Exception:
             try:
                 self.stop()
@@ -365,8 +463,78 @@ class Engine:
                 logging.exception('Cleanup after failed start also failed')
             raise
 
-    def _playback(self, audio, channels):
+    def reconfigure(self, config, tracks):
+        """Prepare new outputs first, then replace routes without touching the mic."""
+        validate_config(config)
+        if len(tracks) != len(config['files']):
+            raise ValueError('Every speaker must have a decoded audio file.')
+        previous_heartbeats = list(self.output_heartbeats)
+        added = []
+        replacements = {}
+        planned = {}
+        try:
+            for name, filename, audio in zip(config['speakers'], config['files'], tracks):
+                if name in self.routes:
+                    route = self.routes[name]
+                    planned[name] = route
+                    if filename != route['file']:
+                        replacements[name] = self._playback(audio, route['channels'], epoch=time.monotonic())
+                else:
+                    device_id, device = resolve(name, 'output')
+                    channels = min(2, device['max_output_channels'])
+                    sd.check_output_settings(device=device_id, channels=channels, samplerate=RATE)
+                    route = dict(file=filename, channels=channels, ready=False)
+                    route['callback'] = self._playback(audio, channels, epoch=time.monotonic())
+
+                    def render(data, *args, slot=route):
+                        if slot['ready']:
+                            slot['callback'](data, *args)
+                        else:
+                            data.fill(0)
+
+                    route['stream'] = sd.OutputStream(device=device_id, samplerate=RATE, channels=channels,
+                                                       dtype='float32', callback=render)
+                    added.append(route)
+                    route['stream'].start()
+                    planned[name] = route
+        except Exception:
+            for route in added:
+                try:
+                    route['stream'].abort()
+                except Exception:
+                    logging.exception('New speaker cleanup failed')
+                finally:
+                    try:
+                        route['stream'].close()
+                    except Exception:
+                        logging.exception('New speaker close failed')
+            self.output_heartbeats = previous_heartbeats
+            raise
+        for name, callback in replacements.items():
+            planned[name]['callback'] = callback
+            planned[name]['file'] = config['files'][config['speakers'].index(name)]
+        for route in added:
+            route['ready'] = True
+        removed = [route for name, route in self.routes.items() if name not in planned]
+        self.routes = planned
+        self.streams = self.streams[:1] + [route['stream'] for route in planned.values()]
+        self.output_heartbeats = [route['callback'].heartbeat for route in planned.values()]
+        for route in removed:
+            try:
+                route['stream'].abort()
+            except Exception:
+                logging.exception('Old speaker stop failed during routing change')
+            finally:
+                try:
+                    route['stream'].close()
+                except Exception:
+                    logging.exception('Old speaker close failed during routing change')
+        self.config.update({key: config[key] for key in ('speakers', 'files', 'routing_rows') if key in config})
+        logging.info('Live routing updated: %s', list(zip(config['speakers'], config['files'])))
+
+    def _playback(self, audio, channels, epoch=None):
         position = None
+        echo = LiveEcho(audio, self.config.get('echo_amount', .35), self.config.get('echo_delay_ms', 350))
         heartbeat = [time.monotonic()]
         self.output_heartbeats.append(heartbeat)
 
@@ -376,7 +544,7 @@ class Engine:
                 self.output_warnings += 1
             if position is None:
                 delay = timing.outputBufferDacTime - timing.currentTime
-                offset = round((time.monotonic() + delay - self.epoch) * RATE)
+                offset = round((time.monotonic() + delay - (self.epoch if epoch is None else epoch)) * RATE)
                 silence = min(frames, max(0, -offset))
                 outdata.fill(0)
                 if silence == frames:
@@ -384,9 +552,13 @@ class Engine:
                 position = max(0, offset)
             else:
                 silence = 0
-            block, position = loop_block(audio, position, frames - silence)
+            count = frames - silence
+            block = echo.render(position, count, self.config.get('echo_amount', .35),
+                                self.config.get('echo_delay_ms', 350))
+            position = (position + count) % len(audio)
             outdata[silence:] = block if channels == 2 else block.mean(axis=1, keepdims=True)
             outdata *= self.config.get('volume', 0.5)
+            np.clip(outdata, -1, 1, out=outdata)
         def guarded_callback(outdata, frames, timing, status):
             heartbeat[0] = time.monotonic()
             try:
@@ -394,6 +566,7 @@ class Engine:
             except Exception as exc:
                 outdata.fill(0)
                 self.error = f'Playback callback failed: {exc}'
+        guarded_callback.heartbeat = heartbeat
         return guarded_callback
 
     def tick(self):
@@ -432,6 +605,7 @@ class Engine:
                 except Exception:
                     logging.exception('Device close failed')
         self.streams.clear()
+        self.routes.clear()
         if self.recorder:
             self.recorder.close()
         logging.info('Exhibit stopped')
@@ -451,6 +625,11 @@ class Session:
     def stop(self):
         self.running = False
         self._close_engine()
+
+    def apply_routes(self, config, tracks):
+        if self.engine:
+            self.engine.reconfigure(config, tracks)
+        self.config.update({key: config[key] for key in ('speakers', 'files', 'routing_rows') if key in config})
 
     def _close_engine(self):
         engine, self.engine = self.engine, None
@@ -476,6 +655,8 @@ class Session:
             self.engine.tick()
             rec = self.engine.recorder
             self.status = ('RECORDING — release to save' if rec.active else 'PLAYING — hold the button to record')
+            if rec.active and getattr(rec, 'skip_frames', 0) > 0:
+                self.status = 'HOLD — waiting 0.5 seconds to skip the button click…'
             self.status += f' | Saved this session: {self.saved + rec.saved}'
         except (DeviceUnavailable, sd.PortAudioError) as exc:
             try:
@@ -501,24 +682,106 @@ def gui():
 
     window = tk.Tk()
     window.title('Exhibit audio controller')
-    window.geometry('760x760')
-    window.minsize(700, 730)
+    window.geometry('820x760')
+    window.minsize(760, 730)
     frame = ttk.Frame(window, padding=20)
     frame.pack(fill='both', expand=True)
-    state = {'engine': None, 'vk': None, 'files': [], 'learning': False}
+    state = {'engine': None, 'vk': None, 'files': [], 'learning': False, 'route_job': None}
     saved = load_gui_config()
     (ROOT / 'audio').mkdir(exist_ok=True)
     discovered = sorted(str(p) for p in (ROOT / 'audio').iterdir()
                         if p.suffix.lower() in ('.wav', '.mp3', '.flac', '.ogg', '.mp4', '.m4a', '.aac'))
     state.update(vk=saved.get('button_vk'), files=saved.get('files', discovered))
     ttk.Label(frame, text='Exhibit audio controller', font=('Segoe UI', 20)).pack(anchor='w')
-    ttk.Label(frame, text='Playlist loops continuously. Hold your button to record; release to save.').pack(anchor='w', pady=(4, 16))
+    ttk.Label(frame, text='One looping file per speaker. Hold your button to record; release to save.').pack(anchor='w', pady=(4, 16))
     ttk.Label(frame, text='Microphone').pack(anchor='w')
     mic = ttk.Combobox(frame, state='readonly')
     mic.pack(fill='x', pady=(4, 10))
-    ttk.Label(frame, text='Speakers — select one or more (Ctrl + click)').pack(anchor='w')
-    speakers = tk.Listbox(frame, height=4, selectmode='extended', exportselection=False)
-    speakers.pack(fill='x', pady=4)
+    ttk.Label(frame, text='Live speaker assignments — selecting a used speaker swaps the two rows').pack(anchor='w')
+    assignments = []
+    for index in range(3):
+        row = ttk.Frame(frame)
+        row.pack(fill='x', pady=5)
+        ttk.Label(row, text=f'{index + 1}.', width=3).pack(side='left')
+        remembered = saved.get('routing_rows', [])
+        row_saved = remembered[index] if index < len(remembered) else {}
+        file_var = tk.StringVar(value=row_saved.get('file', state['files'][index] if index < len(state['files']) else ''))
+        file_entry = ttk.Entry(row, textvariable=file_var, state='readonly', width=28)
+        file_entry.pack(side='left', fill='x', expand=True)
+
+        def choose_file(variable=file_var, selected=index):
+            path = filedialog.askopenfilename(initialdir=ROOT / 'audio', filetypes=[('Audio', '*.wav *.mp3 *.flac *.ogg *.mp4 *.m4a *.aac'), ('All files', '*.*')])
+            if path:
+                variable.set(path)
+                routing_changed('file', selected)
+
+        ttk.Button(row, text='Choose file', command=choose_file).pack(side='left', padx=5)
+        output = ttk.Combobox(row, state='readonly', width=32)
+        output.pack(side='left', fill='x', expand=True)
+        previous = saved.get('speakers', ['Speakers (USB2.0 Device)'])
+        output.set(row_saved.get('output', previous[index] if index < len(previous) else 'Off'))
+        assignments.append((file_var, output))
+        output.bind('<<ComboboxSelected>>', lambda event, selected=index: routing_changed('output', selected))
+
+    def row_values():
+        return [dict(file=file.get(), output=output.get()) for file, output in assignments]
+
+    state['route_snapshot'] = row_values()
+    route_status = tk.StringVar(value='File and speaker changes apply live. Each active file and speaker can be used once.')
+    ttk.Label(frame, textvariable=route_status, wraplength=770).pack(anchor='w')
+
+    def restore_rows(rows):
+        for (file, output), row in zip(assignments, rows):
+            file.set(row['file'])
+            output.set(row['output'])
+        state['route_snapshot'] = row_values()
+
+    def read_config():
+        enabled = [(file.get(), output.get()) for file, output in assignments if output.get() != 'Off']
+        return dict(microphone=mic.get(), speakers=[output for _, output in enabled],
+                    files=[file for file, _ in enabled], button_vk=state['vk'], volume=volume.get(),
+                    echo_amount=echo_amount.get(), echo_delay_ms=echo_delay.get(), routing_rows=row_values())
+
+    def routing_changed(field, selected):
+        previous = state['route_snapshot']
+        rows = row_values()
+        value = rows[selected][field]
+        # Swap an already-used assignment instead of ever creating a duplicate route.
+        for index, row in enumerate(rows):
+            same = (os.path.normcase(str(Path(row[field]).resolve())) == os.path.normcase(str(Path(value).resolve()))
+                    if field == 'file' else row[field] == value)
+            if index != selected and value not in ('', 'Off') and same:
+                variable, output = assignments[index]
+                (variable if field == 'file' else output).set(previous[selected][field])
+        try:
+            proposed = read_config()
+            # Permit configuring routes before the button has been learned.
+            validate_config(dict(proposed, button_vk=proposed['button_vk'] or 13))
+        except Exception as exc:
+            restore_rows(previous)
+            route_status.set(f'Assignment unchanged: {exc}')
+            return
+        state['route_snapshot'] = row_values()
+        session = state['engine']
+        if not session:
+            route_status.set('Assignments ready. Press Start exhibit.')
+            return
+        if state['route_job']:
+            restore_rows(previous)
+            route_status.set('Please wait for the current file change to finish loading.')
+            return
+        # Decode files off the window thread so hold/release detection keeps running.
+        future = Future()
+        state['route_job'] = (future, proposed, session, previous)
+        route_status.set('Loading new assignment… current playback and recording continue.')
+
+        def decode():
+            try:
+                future.set_result(load_playlist(proposed['files'], separate=True, normalize=True))
+            except Exception as exc:
+                future.set_exception(exc)
+
+        threading.Thread(target=decode, daemon=True).start()
 
     def refresh():
         if state['engine']:
@@ -529,43 +792,26 @@ def gui():
         mic['values'] = inputs
         preferred = saved.get('microphone')
         mic.set(preferred if preferred in inputs else next((n for n in inputs if 'CMTECK' in n), inputs[0] if inputs else ''))
-        speakers.delete(0, 'end')
-        for _, d in devices('output'):
-            speakers.insert('end', d['name'])
-            if d['name'] in saved.get('speakers', ['Speakers (USB2.0 Device)']):
-                speakers.selection_set(speakers.size() - 1)
+        available = [d['name'] for _, d in devices('output')]
+        for _, output in assignments:
+            # Retain missing-device selections so they are never silently rerouted.
+            output['values'] = ['Off'] + available + ([output.get()] if output.get() not in available + ['Off'] else [])
 
     ttk.Button(frame, text='Refresh connected devices', command=refresh).pack(anchor='w', pady=(0, 10))
-    ttk.Label(frame, text='Audio files — played in the order below').pack(anchor='w')
-    playlist = tk.Listbox(frame, height=4)
-    playlist.pack(fill='x', pady=4)
+    ttk.Label(frame, text='Playback echo — adjust live while playing').pack(anchor='w', pady=(12, 4))
+    echo_amount = tk.DoubleVar(value=saved.get('echo_amount', .35))
+    echo_delay = tk.DoubleVar(value=saved.get('echo_delay_ms', 350))
+    echo_label = tk.StringVar()
 
-    def display_files():
-        playlist.delete(0, 'end')
-        for i, path in enumerate(state['files'], 1):
-            playlist.insert('end', f'{i}. {Path(path).name}')
+    def describe_echo(*unused):
+        echo_label.set(f'Amount: {echo_amount.get():.0%} (0% = off)     Delay: {echo_delay.get():.0f} ms')
 
-    def choose():
-        paths = filedialog.askopenfilenames(initialdir=ROOT / 'audio', filetypes=[('Audio', '*.wav *.mp3 *.flac *.ogg *.mp4 *.m4a *.aac'), ('All files', '*.*')])
-        if paths:
-            state['files'] = list(paths)
-            display_files()
-
-    def move(delta):
-        selection = playlist.curselection()
-        if selection:
-            index = selection[0]
-            target = index + delta
-            if 0 <= target < len(state['files']):
-                state['files'][index], state['files'][target] = state['files'][target], state['files'][index]
-                display_files()
-                playlist.selection_set(target)
-
-    row = ttk.Frame(frame)
-    row.pack(fill='x')
-    ttk.Button(row, text='Choose audio files', command=choose).pack(side='left')
-    ttk.Button(row, text='Move up', command=lambda: move(-1)).pack(side='left', padx=5)
-    ttk.Button(row, text='Move down', command=lambda: move(1)).pack(side='left')
+    echo_amount.trace_add('write', describe_echo)
+    echo_delay.trace_add('write', describe_echo)
+    describe_echo()
+    ttk.Label(frame, textvariable=echo_label).pack(anchor='w')
+    ttk.Scale(frame, from_=0, to=.75, variable=echo_amount).pack(fill='x')
+    ttk.Scale(frame, from_=50, to=1500, variable=echo_delay).pack(fill='x')
     button_text = tk.StringVar(value=f'Button key: {state["vk"] or "not configured"}')
     ttk.Label(frame, textvariable=button_text).pack(anchor='w', pady=(14, 2))
 
@@ -595,17 +841,19 @@ def gui():
 
     ttk.Button(frame, text='Detect my button', command=learn).pack(anchor='w')
     volume = tk.DoubleVar(value=saved.get('volume', 0.5))
-    ttk.Label(frame, text='Playback volume').pack(anchor='w', pady=(10, 0))
+    ttk.Label(frame, text='Playback volume — quiet files are automatically boosted').pack(anchor='w', pady=(10, 0))
     ttk.Scale(frame, from_=0, to=1, variable=volume).pack(fill='x')
     status = tk.StringVar(value='Stopped. Choose your files and detect the button, then start.')
     ttk.Label(frame, textvariable=status, wraplength=710).pack(anchor='w', pady=12)
 
     def stop():
+        state['route_job'] = None
         engine = state['engine']
         state['engine'] = None
         if engine:
             try:
                 engine.stop()
+                save_config(engine.config)
             except Exception as exc:
                 logging.exception('Stop failed')
                 status.set(f'Stopped with a recording error: {exc}')
@@ -618,8 +866,7 @@ def gui():
         try:
             if state['learning'] or state['vk'] is None:
                 raise ValueError('Detect your button first.')
-            config = dict(microphone=mic.get(), speakers=[speakers.get(i) for i in speakers.curselection()],
-                          files=state['files'], button_vk=state['vk'], volume=volume.get())
+            config = read_config()
             save_config(config)
             engine = Session(config)
             status.set('Loading audio…')
@@ -648,6 +895,20 @@ def gui():
             engine = state['engine']
             if engine:
                 engine.config['volume'] = volume.get()
+                engine.config['echo_amount'] = echo_amount.get()
+                engine.config['echo_delay_ms'] = echo_delay.get()
+                job = state['route_job']
+                if job and job[0].done():
+                    state['route_job'] = None
+                    future, proposed, session, previous = job
+                    if session is engine:
+                        try:
+                            session.apply_routes(proposed, future.result())
+                            route_status.set('Live assignments updated.')
+                        except Exception as exc:
+                            logging.exception('Live assignment rejected; previous routes retained')
+                            restore_rows(previous)
+                            route_status.set(f'Assignment unchanged: {exc}')
                 engine.tick()
                 status.set(engine.status)
         except Exception as exc:
@@ -672,7 +933,6 @@ def gui():
     except Exception as exc:
         logging.exception('Device discovery failed')
         status.set(f'Could not list devices: {exc}. Connect them and click Refresh.')
-    display_files()
     window.protocol('WM_DELETE_WINDOW', close)
     tick()
     window.mainloop()

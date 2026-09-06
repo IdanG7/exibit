@@ -168,7 +168,7 @@ class ReliabilityTests(unittest.TestCase):
         callback(output, 480, SimpleNamespace(outputBufferDacTime=0, currentTime=0), 'output underflow')
         self.assertIsNone(engine.error)
         self.assertEqual(engine.output_warnings, 1)
-        np.testing.assert_allclose(output, .5)
+        np.testing.assert_allclose(output, .5, atol=1e-7)
 
     def test_callback_exception_outputs_silence_and_reports_problem(self):
         engine = Engine({'volume': .5})
