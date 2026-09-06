@@ -1,0 +1,27 @@
+"""60-second silent rehearsal of configured devices; does not record visitor audio."""
+import json
+import time
+from unittest.mock import patch
+
+from exhibit import CONFIG, Engine, ROOT, validate_config
+
+config = validate_config(json.loads(CONFIG.read_text()))
+config['volume'] = 0
+engine = Engine(config)
+started = time.monotonic()
+try:
+    engine.start()
+    with patch('exhibit.ctypes.windll.user32.GetAsyncKeyState', return_value=0):
+        while time.monotonic() - started < 60:
+            engine.tick()
+            time.sleep(.01)
+    report = dict(seconds=round(time.monotonic() - started, 2),
+                  microphone=config['microphone'], speakers=config['speakers'],
+                  output_buffer_interruptions=engine.output_warnings,
+                  recordings_created=engine.recorder.saved,
+                  input_callback_age_seconds=round(time.monotonic() - engine.recorder.last_callback, 3),
+                  result='passed')
+finally:
+    engine.stop()
+(ROOT / 'logs' / 'hardware-reliability.json').write_text(json.dumps(report, indent=2))
+print(json.dumps(report, indent=2))

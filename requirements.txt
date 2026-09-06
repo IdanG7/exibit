@@ -1,0 +1,5 @@
+numpy>=2.2,<3
+scipy>=1.15,<2
+sounddevice>=0.5,<1
+soundfile>=0.13,<1
+imageio-ffmpeg>=0.6,<1
