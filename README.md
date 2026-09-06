@@ -8,6 +8,13 @@ On another Windows laptop, install Python 3.11 or newer and run **Setup.cmd** fi
    that should play it. Set unused rows to **Off** (for example, when testing one speaker).
 3. Set the playback echo amount and delay. Start with 35% / 350 ms, or use 0% for no echo.
    Echo, volume, file selections, and speaker assignments all update while playing.
+   **Delay between loops** adds 0–30 seconds of silence after each file finishes, independently
+   for each speaker. The shared delay slider updates live and defaults to zero.
+   Click anywhere on a slider to jump directly to that value, or drag continuously.
+   For an exact loop delay, type seconds into **Set seconds** and press Enter or click
+   elsewhere. The arrow buttons adjust it in 0.1-second steps.
+   Use a row's **Pause / Resume** button to freeze and resume that speaker's position,
+   including any remaining loop delay. Other speakers and microphone recording continue.
 4. Click **Detect my button**, release all keys, wait two seconds, and hold the physical
    button until its key code appears. Then release it.
 5. Click **Start exhibit**. Minimize the window to leave it running in the background.
@@ -27,7 +34,9 @@ No automatic startup is installed.
 
 Each enabled row loops its own file independently on its assigned speaker. Outputs start
 together approximately; a shorter file repeats without waiting for the other files.
-One to three outputs can be enabled. WAV, MP3, FLAC, OGG, MP4, M4A, and AAC are supported. MP4 video is
+Zero to three outputs can be enabled. With every row set to **Off**, there is no speaker
+playback and the microphone recorder still works. You can start in this mode or switch
+all outputs off and back on while running. WAV, MP3, FLAC, OGG, MP4, M4A, and AAC are supported. MP4 video is
 ignored and its audio is decoded using bundled FFmpeg. Files in `audio/` are discovered
 automatically on first launch.
 Mono files are duplicated to stereo, and files are converted to 48 kHz for playback.
@@ -44,19 +53,21 @@ device clocks can drift and Bluetooth adds latency; sample-accurate synchronizat
 
 Choose a different file or speaker while running to change its assignment. Selecting one
 already used in another row swaps those two assignments. Each active file and speaker can
-appear only once; equivalent file paths are also treated as duplicates. At least one row
-must remain enabled. New files decode in the background. Wait for the loading message to
+appear only once; equivalent file paths are also treated as duplicates. New files decode in the background. Wait for the loading message to
 finish before making another routing change. A failed change retains the previous routes.
 Unchanged speakers keep playing, and the microphone recording stream is not restarted.
 Changed files begin near their start; opening a different hardware output can add a short
-delay. Assignments are saved when the controller is stopped or closed.
+delay. Pause state belongs to the speaker device, so swapping assignments preserves that
+speaker's paused state. Off closes its output; enabling it again starts its file near the
+beginning. Assignments, pause states, and loop delay are saved when stopped or closed.
 
 Echo applies only to the playback files. Amount controls the strength of three decaying
 repeats, and delay controls their spacing (50–1500 ms). Adjust either slider while playing;
 changes crossfade over 50 ms without restarting loops or recording. Settings are saved
 when you stop or close the controller. The echoes wrap across each file's
 loop boundary, preserving its original duration. This produces an already-established echo
-on the first loop as well. Mixing includes volume headroom and output clipping protection.
+on the first loop as well. During the loop delay all playback, including echo, is silent.
+Mixing includes volume headroom and output clipping protection.
 Original audio files and microphone recordings are not modified by the echo.
 
 ## Button and recording behavior

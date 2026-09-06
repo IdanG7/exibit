@@ -51,7 +51,12 @@ class ReliabilityTests(unittest.TestCase):
 
             window.after(20, start)
             window.after(150, restart)
-            window.after(300, window.destroy)
+            def finish_window_test():
+                for callback in window.tk.call('after', 'info'):
+                    window.after_cancel(callback)
+                window.destroy()
+
+            window.after(300, finish_window_test)
             with patch('tkinter.Tk', return_value=window), patch('exhibit.ROOT', root_path), \
                     patch('exhibit.load_gui_config', return_value=config), patch('exhibit.save_config'), \
                     patch('exhibit.sd._terminate'), patch('exhibit.sd._initialize'), \
@@ -197,7 +202,7 @@ class ReliabilityTests(unittest.TestCase):
         first.recorder = None
         second.recorder = SimpleNamespace(saved=0, active=False)
         factory = Mock(side_effect=[first, second])
-        session = Session({}, factory)
+        session = Session({'speakers': ['speaker']}, factory)
         with self.assertLogs(level='WARNING'):
             session.tick()
         self.assertIsNone(session.engine)
