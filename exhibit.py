@@ -34,9 +34,31 @@ class DeviceUnavailable(RuntimeError):
     pass
 
 
+def speaker_values(config, speaker=None):
+    values = dict(volume=config.get('volume', .5), echo_amount=config.get('echo_amount', .35),
+                  echo_delay_ms=config.get('echo_delay_ms', 350),
+                  loop_delay_seconds=config.get('loop_delay_seconds', 0))
+    values.update(config.get('speaker_settings', {}).get(speaker, {}))
+    return values
+
+
+def validate_speaker_settings(settings):
+    if not isinstance(settings, dict):
+        raise ValueError('Speaker settings must be an object.')
+    for name, values in settings.items():
+        if not isinstance(name, str) or not isinstance(values, dict):
+            raise ValueError('Invalid speaker settings.')
+        for key, low, high in [('volume', 0, 1), ('echo_amount', 0, .75), ('echo_delay_ms', 50, 1500), ('loop_delay_seconds', 0, 30)]:
+            if key in values:
+                value = values[key]
+                if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
+                    raise ValueError(f'{name}: invalid {key}.')
+
+
 def validate_config(config):
     if not isinstance(config, dict):
         raise ValueError('Settings must be a JSON object. Open the controller to configure it.')
+    validate_speaker_settings(config.get('speaker_settings', {}))
     if not isinstance(config.get('microphone'), str) or not config['microphone']:
         raise ValueError('Select a microphone.')
     for field in ('speakers', 'files'):
@@ -105,6 +127,11 @@ def load_gui_config(path=CONFIG):
                 or not all(isinstance(row, dict) and isinstance(row.get('file'), str)
                            and isinstance(row.get('output'), str) for row in config['routing_rows'])):
             config.pop('routing_rows')
+        try:
+            validate_speaker_settings(config.get('speaker_settings', {}))
+        except ValueError:
+            logging.warning('Invalid per-speaker settings reset to the existing playback defaults')
+            config.pop('speaker_settings', None)
         return config
     except (ValueError, OSError) as exc:
         logging.error('Could not read settings; opening setup. Original file retained: %s', exc)
@@ -540,12 +567,14 @@ class Engine:
 
     def _playback(self, audio, channels, epoch=None, speaker=None):
         position = None
-        echo = LiveEcho(audio, self.config.get('echo_amount', .35), self.config.get('echo_delay_ms', 350))
+        initial = speaker_values(self.config, speaker)
+        echo = LiveEcho(audio, initial['echo_amount'], initial['echo_delay_ms'])
         heartbeat = [time.monotonic()]
         self.output_heartbeats.append(heartbeat)
 
         def callback(outdata, frames, timing, status):
             nonlocal position
+            settings = speaker_values(self.config, speaker)
             if status:
                 self.output_warnings += 1
             if speaker is not None and speaker in self.config.get('paused_speakers', []):
@@ -563,7 +592,7 @@ class Engine:
                 position = max(0, offset)
             else:
                 silence = 0
-            gap = round(self.config.get('loop_delay_seconds', 0) * RATE)
+            gap = round(settings['loop_delay_seconds'] * RATE)
             cycle = len(audio) + gap
             if position >= cycle:
                 position = 0
@@ -572,14 +601,13 @@ class Engine:
             while written < frames:
                 if position < len(audio):
                     count = min(frames - written, len(audio) - position)
-                    block = echo.render(position, count, self.config.get('echo_amount', .35),
-                                        self.config.get('echo_delay_ms', 350))
+                    block = echo.render(position, count, settings['echo_amount'], settings['echo_delay_ms'])
                     outdata[written:written + count] = block if channels == 2 else block.mean(axis=1, keepdims=True)
                 else:
                     count = min(frames - written, cycle - position)
                 written += count
                 position = (position + count) % cycle
-            outdata *= self.config.get('volume', 0.5)
+            outdata *= settings['volume']
             np.clip(outdata, -1, 1, out=outdata)
         def guarded_callback(outdata, frames, timing, status):
             heartbeat[0] = time.monotonic()
@@ -726,23 +754,63 @@ def gui():
 
     window = tk.Tk()
     window.title('Exhibit audio controller')
-    window.geometry('930x820')
-    window.minsize(850, 780)
-    frame = ttk.Frame(window, padding=20)
-    frame.pack(fill='both', expand=True)
+    window.geometry(f'960x{min(870, window.winfo_screenheight() - 100)}')
+    window.minsize(850, 700)
+    style = ttk.Style(window)
+    style.configure('Section.TLabel', font=('Segoe UI', 12, 'bold'))
+    style.configure('Hint.TLabel', foreground='#505b65')
+    style.configure('TNotebook.Tab', padding=(16, 8))
+    shell = ttk.Frame(window, padding=20)
+    shell.pack(fill='both', expand=True)
     state = {'engine': None, 'vk': None, 'files': [], 'learning': False, 'route_job': None}
     saved = load_gui_config()
+    state['speaker_settings'] = {name: dict(values) for name, values in saved.get('speaker_settings', {}).items()}
+    state['loading_controls'] = False
     state['paused_speakers'] = set(saved.get('paused_speakers', []))
     (ROOT / 'audio').mkdir(exist_ok=True)
     discovered = sorted(str(p) for p in (ROOT / 'audio').iterdir()
                         if p.suffix.lower() in ('.wav', '.mp3', '.flac', '.ogg', '.mp4', '.m4a', '.aac'))
     state.update(vk=saved.get('button_vk'), files=saved.get('files', discovered))
-    ttk.Label(frame, text='Exhibit audio controller', font=('Segoe UI', 20)).pack(anchor='w')
-    ttk.Label(frame, text='One looping file per speaker. Hold your button to record; release to save.').pack(anchor='w', pady=(4, 16))
-    ttk.Label(frame, text='Microphone').pack(anchor='w')
-    mic = ttk.Combobox(frame, state='readonly')
-    mic.pack(fill='x', pady=(4, 10))
-    ttk.Label(frame, text='Live speaker assignments — selecting a used speaker swaps the two rows').pack(anchor='w')
+    ttk.Label(shell, text='Exhibit audio controller', font=('Segoe UI', 20)).pack(anchor='w')
+    ttk.Label(shell, text='Set up your speakers, adjust the sound, and collect visitor recordings.',
+              style='Hint.TLabel').pack(anchor='w', pady=(4, 16))
+    footer = ttk.Frame(shell, padding=(0, 12, 0, 0))
+    footer.pack(side='bottom', fill='x')
+    tabs = ttk.Notebook(shell)
+    tabs.pack(fill='both', expand=True)
+    playback_page = ttk.Frame(tabs)
+    viewport = tk.Canvas(playback_page, highlightthickness=0, background=window.cget('background'))
+    scrollbar = ttk.Scrollbar(playback_page, orient='vertical', command=viewport.yview)
+    scrollbar.pack(side='right', fill='y')
+    viewport.pack(side='left', fill='both', expand=True)
+    viewport.configure(yscrollcommand=scrollbar.set)
+    frame = ttk.Frame(viewport, padding=16)
+    content_window = viewport.create_window(0, 0, window=frame, anchor='nw')
+    frame.bind('<Configure>', lambda event: viewport.configure(scrollregion=viewport.bbox('all')))
+    viewport.bind('<Configure>', lambda event: viewport.itemconfigure(content_window, width=event.width))
+    recording_tab = ttk.Frame(tabs, padding=16)
+    tabs.add(playback_page, text='Playback')
+    tabs.add(recording_tab, text='Recording setup')
+
+    def scroll_playback(event):
+        widget = window.winfo_containing(event.x_root, event.y_root)
+        if widget and widget.winfo_class() not in ('TScale', 'TSpinbox', 'TCombobox'):
+            while widget is not None:
+                if widget is playback_page:
+                    viewport.yview_scroll(-int(event.delta / 120), 'units')
+                    return 'break'
+                widget = widget.master
+
+    window.bind('<MouseWheel>', scroll_playback)
+    ttk.Label(recording_tab, text='Visitor microphone', style='Section.TLabel').pack(anchor='w')
+    ttk.Label(recording_tab, text='Hold the button, wait half a second, then speak. Release to save.',
+              style='Hint.TLabel').pack(anchor='w', pady=(8, 16))
+    ttk.Label(recording_tab, text='Microphone input').pack(anchor='w')
+    mic = ttk.Combobox(recording_tab, state='readonly')
+    mic.pack(fill='x', pady=(4, 16))
+    ttk.Label(frame, text='1. Assign your speakers', style='Section.TLabel').pack(anchor='w')
+    ttk.Label(frame, text='One file per speaker. Selecting an assignment already in use swaps the rows.',
+              style='Hint.TLabel').pack(anchor='w', pady=(4, 8))
     assignments = []
     pause_buttons = []
     for index in range(3):
@@ -752,7 +820,10 @@ def gui():
         remembered = saved.get('routing_rows', [])
         row_saved = remembered[index] if index < len(remembered) else {}
         file_var = tk.StringVar(value=row_saved.get('file', state['files'][index] if index < len(state['files']) else ''))
-        file_entry = ttk.Entry(row, textvariable=file_var, state='readonly', width=28)
+        display_name = tk.StringVar(value=Path(file_var.get()).name if file_var.get() else 'Choose an audio file')
+        file_var.trace_add('write', lambda *args, source=file_var, target=display_name:
+                          target.set(Path(source.get()).name if source.get() else 'Choose an audio file'))
+        file_entry = ttk.Entry(row, textvariable=display_name, state='readonly', width=20)
         file_entry.pack(side='left', fill='x', expand=True)
 
         def choose_file(variable=file_var, selected=index):
@@ -762,7 +833,7 @@ def gui():
                 routing_changed('file', selected)
 
         ttk.Button(row, text='Choose file', command=choose_file).pack(side='left', padx=5)
-        output = ttk.Combobox(row, state='readonly', width=32)
+        output = ttk.Combobox(row, state='readonly', width=30)
         output.pack(side='left', fill='x', expand=True)
         previous = saved.get('speakers', ['Speakers (USB2.0 Device)'])
         output.set(row_saved.get('output', previous[index] if index < len(previous) else 'Off'))
@@ -793,8 +864,8 @@ def gui():
         return [dict(file=file.get(), output=output.get()) for file, output in assignments]
 
     state['route_snapshot'] = row_values()
-    route_status = tk.StringVar(value='File and speaker changes apply live. Each active file and speaker can be used once.')
-    ttk.Label(frame, textvariable=route_status, wraplength=770).pack(anchor='w')
+    route_status = tk.StringVar(value='Assignments update live. Set every speaker to Off for recording only.')
+    ttk.Label(frame, textvariable=route_status, wraplength=800, style='Hint.TLabel').pack(anchor='w', pady=(4, 8))
 
     def restore_rows(rows):
         for (file, output), row in zip(assignments, rows):
@@ -802,13 +873,15 @@ def gui():
             output.set(row['output'])
         state['route_snapshot'] = row_values()
         refresh_pause_buttons()
+        refresh_editor()
 
     def read_config():
         enabled = [(file.get(), output.get()) for file, output in assignments if output.get() != 'Off']
         return dict(microphone=mic.get(), speakers=[output for _, output in enabled],
-                    files=[file for file, _ in enabled], button_vk=state['vk'], volume=volume.get(),
-                    echo_amount=echo_amount.get(), echo_delay_ms=echo_delay.get(), routing_rows=row_values(),
-                    loop_delay_seconds=loop_delay.get(), paused_speakers=sorted(state['paused_speakers']))
+                    files=[file for file, _ in enabled], button_vk=state['vk'], volume=saved.get('volume', .5),
+                    echo_amount=saved.get('echo_amount', .35), echo_delay_ms=saved.get('echo_delay_ms', 350), routing_rows=row_values(),
+                    speaker_settings={name: dict(values) for name, values in state['speaker_settings'].items()},
+                    loop_delay_seconds=saved.get('loop_delay_seconds', 0), paused_speakers=sorted(state['paused_speakers']))
 
     def routing_changed(field, selected):
         previous = state['route_snapshot']
@@ -831,6 +904,7 @@ def gui():
             return
         state['route_snapshot'] = row_values()
         refresh_pause_buttons()
+        refresh_editor()
         session = state['engine']
         if not session:
             route_status.set('Assignments ready. Press Start exhibit.')
@@ -858,63 +932,91 @@ def gui():
         sd._terminate()
         sd._initialize()
         inputs = [d['name'] for _, d in devices('input')]
-        mic['values'] = inputs
         preferred = saved.get('microphone')
-        mic.set(preferred if preferred in inputs else next((n for n in inputs if 'CMTECK' in n), inputs[0] if inputs else ''))
+        mic['values'] = inputs + ([preferred] if preferred and preferred not in inputs else [])
+        mic.set(preferred or next((n for n in inputs if 'CMTECK' in n), inputs[0] if inputs else ''))
         available = [d['name'] for _, d in devices('output')]
         for _, output in assignments:
             # Retain missing-device selections so they are never silently rerouted.
             output['values'] = ['Off'] + available + ([output.get()] if output.get() not in available + ['Off'] else [])
 
-    ttk.Button(frame, text='Refresh connected devices', command=refresh).pack(anchor='w', pady=(0, 10))
-    loop_delay = tk.DoubleVar(value=saved.get('loop_delay_seconds', 0))
+    ttk.Button(recording_tab, text='Refresh connected devices', command=refresh).pack(anchor='w', pady=(0, 16))
+    ttk.Separator(frame).pack(fill='x', pady=(8, 16))
+    ttk.Label(frame, text='2. Adjust one speaker', style='Section.TLabel').pack(anchor='w')
+    ttk.Label(frame, text='Choose the speaker to edit. Its sound changes live; other speakers keep their settings.',
+              style='Hint.TLabel').pack(anchor='w', pady=(4, 8))
+    speaker_selector = ttk.Combobox(frame, state='readonly', name='speaker_selector')
+    speaker_selector.pack(fill='x', pady=(0, 8))
+    selected_hint = tk.StringVar()
+    ttk.Label(frame, textvariable=selected_hint, style='Hint.TLabel').pack(anchor='w', pady=(0, 8))
+    volume = tk.DoubleVar()
+    echo_amount = tk.DoubleVar()
+    echo_delay = tk.DoubleVar()
+    loop_delay = tk.DoubleVar()
+    echo_delay_label = tk.StringVar()
     loop_label = tk.StringVar()
-    loop_entry = tk.StringVar()
-
-    def describe_loop(*unused):
-        loop_label.set(f'Delay between loops: {loop_delay.get():.1f} seconds (updates live)')
-        loop_entry.set(f'{loop_delay.get():.1f}')
-
-    loop_delay.trace_add('write', describe_loop)
-    describe_loop()
-    delay_row = ttk.Frame(frame)
-    delay_row.pack(fill='x')
-    ttk.Label(delay_row, textvariable=loop_label).pack(side='left')
-
-    def commit_delay(event=None):
-        try:
-            value = float(loop_entry.get())
-            if not math.isfinite(value) or not 0 <= value <= 30:
-                raise ValueError()
-            loop_delay.set(value)
-        except ValueError:
-            loop_entry.set(f'{loop_delay.get():.1f}')
-            route_status.set('Loop delay must be a number from 0 to 30 seconds.')
-        return 'break'
-
-    delay_input = ttk.Spinbox(delay_row, from_=0, to=30, increment=.1, width=7,
-                              textvariable=loop_entry, command=commit_delay)
-    delay_input.pack(side='right')
-    ttk.Label(delay_row, text='Set seconds: ').pack(side='right')
-    delay_input.bind('<Return>', commit_delay)
-    delay_input.bind('<FocusOut>', commit_delay)
-    click_scale(frame, from_=0, to=30, variable=loop_delay).pack(fill='x')
-    ttk.Label(frame, text='Playback echo — adjust live while playing').pack(anchor='w', pady=(12, 4))
-    echo_amount = tk.DoubleVar(value=saved.get('echo_amount', .35))
-    echo_delay = tk.DoubleVar(value=saved.get('echo_delay_ms', 350))
+    volume_label = tk.StringVar()
     echo_label = tk.StringVar()
-
-    def describe_echo(*unused):
-        echo_label.set(f'Amount: {echo_amount.get():.0%} (0% = off)     Delay: {echo_delay.get():.0f} ms')
-
-    echo_amount.trace_add('write', describe_echo)
-    echo_delay.trace_add('write', describe_echo)
-    describe_echo()
+    ttk.Label(frame, textvariable=volume_label).pack(anchor='w')
+    volume_slider = click_scale(frame, from_=0, to=1, variable=volume, name='speaker_volume')
+    volume_slider.pack(fill='x', pady=(0, 8))
     ttk.Label(frame, textvariable=echo_label).pack(anchor='w')
-    click_scale(frame, from_=0, to=.75, variable=echo_amount).pack(fill='x')
-    click_scale(frame, from_=50, to=1500, variable=echo_delay).pack(fill='x')
+    echo_slider = click_scale(frame, from_=0, to=.75, variable=echo_amount, name='speaker_echo')
+    echo_slider.pack(fill='x', pady=(0, 8))
+    ttk.Label(frame, textvariable=echo_delay_label).pack(anchor='w')
+    echo_delay_slider = click_scale(frame, from_=50, to=1500, variable=echo_delay, name='echo_delay')
+    echo_delay_slider.pack(fill='x', pady=(0, 8))
+    ttk.Label(frame, textvariable=loop_label).pack(anchor='w')
+    loop_slider = click_scale(frame, from_=0, to=30, variable=loop_delay, name='speaker_loop_delay')
+    loop_slider.pack(fill='x', pady=(0, 8))
+
+    def selected_device():
+        index = speaker_selector.current()
+        return assignments[index][1].get() if index >= 0 else 'Off'
+
+    def sound_changed(*unused):
+        volume_label.set(f'Volume   {volume.get():.0%}')
+        echo_label.set(f'Echo   {echo_amount.get():.0%}   ·   0% turns echo off')
+        echo_delay_label.set(f'Echo delay   {echo_delay.get():.0f} ms')
+        loop_label.set(f'Loop delay   {loop_delay.get():.1f} seconds - silence before this speaker repeats')
+        name = state.get('editing_device', 'Off')
+        if state['loading_controls'] or name == 'Off':
+            return
+        state['speaker_settings'][name] = dict(volume=volume.get(), echo_amount=echo_amount.get(),
+                                             echo_delay_ms=echo_delay.get(), loop_delay_seconds=loop_delay.get())
+
+    for variable in (volume, echo_amount, echo_delay, loop_delay):
+        variable.trace_add('write', sound_changed)
+
+    def refresh_editor(event=None):
+        index = max(0, speaker_selector.current())
+        labels = [f'Speaker {i + 1} — {output.get()}' for i, (_, output) in enumerate(assignments)]
+        speaker_selector['values'] = labels
+        speaker_selector.current(index)
+        name = selected_device()
+        settings = speaker_values(dict(saved, speaker_settings=state['speaker_settings']), name)
+        state['loading_controls'] = True
+        try:
+            state['editing_device'] = name
+            volume.set(settings['volume'])
+            echo_amount.set(settings['echo_amount'])
+            echo_delay.set(settings['echo_delay_ms'])
+            loop_delay.set(settings['loop_delay_seconds'])
+        finally:
+            state['loading_controls'] = False
+        enabled = 'disabled' if name == 'Off' else 'normal'
+        for control in (volume_slider, echo_slider, echo_delay_slider, loop_slider):
+            control.configure(state=enabled)
+        selected_hint.set('This row is Off. Assign a speaker above to adjust its sound.' if name == 'Off'
+                          else f'Playing: {Path(assignments[index][0].get()).name or "No file selected"}')
+
+    speaker_selector['values'] = [f'Speaker {i+1}' for i in range(3)]
+    speaker_selector.current(next((i for i, (_, output) in enumerate(assignments) if output.get() != 'Off'), 0))
+    speaker_selector.bind('<<ComboboxSelected>>', refresh_editor)
+    refresh_editor()
     button_text = tk.StringVar(value=f'Button key: {state["vk"] or "not configured"}')
-    ttk.Label(frame, textvariable=button_text).pack(anchor='w', pady=(14, 2))
+    ttk.Label(recording_tab, text='Record button', style='Section.TLabel').pack(anchor='w', pady=(8, 8))
+    ttk.Label(recording_tab, textvariable=button_text).pack(anchor='w', pady=(0, 8))
 
     def learn():
         if state['engine']:
@@ -940,12 +1042,15 @@ def gui():
         else:
             window.after(10, lambda: scan(deadline))
 
-    ttk.Button(frame, text='Detect my button', command=learn).pack(anchor='w')
-    volume = tk.DoubleVar(value=saved.get('volume', 0.5))
-    ttk.Label(frame, text='Playback volume — quiet files are automatically boosted').pack(anchor='w', pady=(10, 0))
-    click_scale(frame, from_=0, to=1, variable=volume).pack(fill='x')
-    status = tk.StringVar(value='Stopped. Choose your files and detect the button, then start.')
-    ttk.Label(frame, textvariable=status, wraplength=710).pack(anchor='w', pady=12)
+    ttk.Button(recording_tab, text='Detect my button', command=learn).pack(anchor='w')
+    ttk.Separator(recording_tab).pack(fill='x', pady=24)
+    ttk.Label(recording_tab, text='Saved recordings', style='Section.TLabel').pack(anchor='w')
+    ttk.Label(recording_tab, text='Each hold saves a separate WAV. Playback effects do not change recordings.',
+              style='Hint.TLabel').pack(anchor='w', pady=8)
+    ttk.Label(recording_tab, text=str(ROOT / 'recordings'), wraplength=760).pack(anchor='w')
+    status = tk.StringVar(value='Stopped — choose your speakers, then start the exhibit.')
+    ttk.Separator(footer).pack(fill='x', pady=(0, 12))
+    ttk.Label(footer, textvariable=status, wraplength=870).pack(anchor='w', pady=(0, 12))
 
     def stop():
         state['route_job'] = None
@@ -981,7 +1086,7 @@ def gui():
             status.set(f'Could not start: {exc}')
             messagebox.showerror('Could not start', str(exc))
 
-    controls = ttk.Frame(frame)
+    controls = ttk.Frame(footer)
     controls.pack(fill='x')
     ttk.Button(controls, text='Start exhibit', command=start).pack(side='left')
     ttk.Button(controls, text='Stop and save', command=stop).pack(side='left', padx=8)
@@ -995,10 +1100,7 @@ def gui():
                 stop()
             engine = state['engine']
             if engine:
-                engine.config['volume'] = volume.get()
-                engine.config['echo_amount'] = echo_amount.get()
-                engine.config['echo_delay_ms'] = echo_delay.get()
-                engine.config['loop_delay_seconds'] = loop_delay.get()
+                engine.config['speaker_settings'] = {name: dict(values) for name, values in state['speaker_settings'].items()}
                 engine.config['paused_speakers'] = sorted(state['paused_speakers'])
                 job = state['route_job']
                 if job and job[0].done():
@@ -1023,6 +1125,10 @@ def gui():
 
     def close():
         stop()
+        try:
+            save_config(read_config())
+        except (ValueError, OSError):
+            logging.exception('Incomplete setup was not saved on close; previous settings retained')
         window.destroy()
 
     def callback_error(error_type, error, traceback):
@@ -1036,6 +1142,7 @@ def gui():
     except Exception as exc:
         logging.exception('Device discovery failed')
         status.set(f'Could not list devices: {exc}. Connect them and click Refresh.')
+    tabs.select(playback_page)
     window.protocol('WM_DELETE_WINDOW', close)
     tick()
     window.mainloop()
