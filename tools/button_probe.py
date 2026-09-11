@@ -2,7 +2,7 @@
 import ctypes
 import json
 import time
-from exhibit import ROOT
+from app.exhibit import ROOT
 
 deadline = time.monotonic() + 40
 held = {}
@@ -23,5 +23,6 @@ while time.monotonic() < deadline:
                 events.append(event)
                 print(json.dumps(event), flush=True)
     time.sleep(.01)
+(ROOT / 'logs').mkdir(exist_ok=True)
 (ROOT / 'logs' / 'button-probe.json').write_text(json.dumps(events, indent=2))
 print('Done.', flush=True)

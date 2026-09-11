@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from exhibit import DeviceUnavailable, Engine, validate_config
+from app.exhibit import DeviceUnavailable, Engine, validate_config
 
 
 class LiveRoutingTests(unittest.TestCase):
@@ -20,12 +20,12 @@ class LiveRoutingTests(unittest.TestCase):
                            button_vk=13, volume=1, echo_amount=0)
         self.tracks = [np.full((4800, 2), value, dtype='float32') for value in (.1, .2, .3)]
         self.addCleanup(patch.stopall)
-        self.resolve = patch('exhibit.resolve', return_value=(0, dict(default_samplerate=48000, max_output_channels=2))).start()
-        patch('exhibit.load_playlist', return_value=self.tracks[:2]).start()
-        patch('exhibit.sd.check_input_settings').start()
-        patch('exhibit.sd.check_output_settings').start()
-        self.mic = patch('exhibit.sd.InputStream').start().return_value
-        self.recorder = patch('exhibit.Recorder').start().return_value
+        self.resolve = patch('app.exhibit.resolve', return_value=(0, dict(default_samplerate=48000, max_output_channels=2))).start()
+        patch('app.exhibit.load_playlist', return_value=self.tracks[:2]).start()
+        patch('app.exhibit.sd.check_input_settings').start()
+        patch('app.exhibit.sd.check_output_settings').start()
+        self.mic = patch('app.exhibit.sd.InputStream').start().return_value
+        self.recorder = patch('app.exhibit.Recorder').start().return_value
         self.streams = []
 
         def output(**kwargs):
@@ -34,7 +34,7 @@ class LiveRoutingTests(unittest.TestCase):
             self.streams.append(stream)
             return stream
 
-        self.output = patch('exhibit.sd.OutputStream', side_effect=output).start()
+        self.output = patch('app.exhibit.sd.OutputStream', side_effect=output).start()
         self.engine = Engine(self.config)
         self.engine.start()
         self.addCleanup(self.engine.stop)

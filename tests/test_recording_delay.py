@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 import soundfile as sf
 
-from exhibit import Recorder
+from app.exhibit import Recorder
 
 
 class RecordingDelayTests(unittest.TestCase):

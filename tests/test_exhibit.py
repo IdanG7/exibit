@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from exhibit import Recorder, load_playlist, loop_block
+from app.exhibit import Recorder, load_playlist, loop_block
 
 
 class ExhibitTests(unittest.TestCase):
@@ -22,7 +22,7 @@ class ExhibitTests(unittest.TestCase):
             partial.write_bytes(b'preserve unfinished recording')
             for expected in (9, 10):
                 recorder = Recorder(folder, 48000)
-                with patch('exhibit.datetime') as clock:
+                with patch('app.exhibit.datetime') as clock:
                     clock.now.return_value = datetime(2026, 9, 5, 15, 23, 10)
                     recorder.press()
                 recorder.callback(np.zeros((120, 1), dtype='float32'), 120, None, False)

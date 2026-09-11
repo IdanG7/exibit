@@ -2,7 +2,7 @@
 import time
 import numpy as np
 import sounddevice as sd
-from exhibit import resolve
+from app.exhibit import resolve
 
 mic_id, mic = resolve('Microphone (CMTECK)', 'input')
 speaker_id, speaker = resolve('Speakers (USB2.0 Device)', 'output')

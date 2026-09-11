@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from exhibit import Engine, LiveEcho, apply_echo, validate_config
+from app.exhibit import Engine, LiveEcho, apply_echo, validate_config
 
 
 class RoutingEchoTests(unittest.TestCase):
@@ -37,7 +37,7 @@ class RoutingEchoTests(unittest.TestCase):
         engine.epoch = 100
         callback = engine._playback(audio, 2)
         timing = SimpleNamespace(currentTime=0, outputBufferDacTime=0)
-        with patch('exhibit.time.monotonic', return_value=100):
+        with patch('app.exhibit.time.monotonic', return_value=100):
             first = np.empty((100, 2), dtype='float32')
             callback(first, 100, timing, False)
             np.testing.assert_array_equal(first, audio[:100])
@@ -86,16 +86,16 @@ class RoutingEchoTests(unittest.TestCase):
                 callbacks.append(kwargs['callback'])
                 return Mock()
 
-            with patch('exhibit.resolve', return_value=(0, dict(default_samplerate=48000, max_output_channels=2))), \
-                    patch('exhibit.load_playlist', return_value=tracks), patch('exhibit.Recorder'), \
-                    patch('exhibit.sd.check_input_settings'), patch('exhibit.sd.check_output_settings'), \
-                    patch('exhibit.sd.InputStream'), patch('exhibit.sd.OutputStream', side_effect=output):
+            with patch('app.exhibit.resolve', return_value=(0, dict(default_samplerate=48000, max_output_channels=2))), \
+                    patch('app.exhibit.load_playlist', return_value=tracks), patch('app.exhibit.Recorder'), \
+                    patch('app.exhibit.sd.check_input_settings'), patch('app.exhibit.sd.check_output_settings'), \
+                    patch('app.exhibit.sd.InputStream'), patch('app.exhibit.sd.OutputStream', side_effect=output):
                 engine = Engine(config)
                 engine.start()
                 try:
                     self.assertEqual(len(callbacks), 3)
                     timing = SimpleNamespace(currentTime=0, outputBufferDacTime=0)
-                    with patch('exhibit.time.monotonic', return_value=engine.epoch):
+                    with patch('app.exhibit.time.monotonic', return_value=engine.epoch):
                         for track, callback in zip(tracks, callbacks):
                             for start in (0, 10):
                                 data = np.empty((10, 2), dtype='float32')

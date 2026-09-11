@@ -1,3 +1,3 @@
 @echo off
 cd /d "%~dp0"
-start "" "%~dp0.venv\Scripts\pythonw.exe" "%~dp0exhibit.py"
+start "" "%~dp0.venv\Scripts\pythonw.exe" -m app.exhibit

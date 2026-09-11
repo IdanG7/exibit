@@ -3,15 +3,17 @@ import json
 import time
 from unittest.mock import patch
 
-from exhibit import CONFIG, Engine, ROOT, validate_config
+from app.exhibit import CONFIG, Engine, ROOT, validate_config
 
 config = validate_config(json.loads(CONFIG.read_text()))
 config['volume'] = 0
+for settings in config.get('speaker_settings', {}).values():
+    settings['volume'] = 0
 engine = Engine(config)
 started = time.monotonic()
 try:
     engine.start()
-    with patch('exhibit.ctypes.windll.user32.GetAsyncKeyState', return_value=0):
+    with patch('app.exhibit.ctypes.windll.user32.GetAsyncKeyState', return_value=0):
         while time.monotonic() - started < 60:
             engine.tick()
             time.sleep(.01)
@@ -23,5 +25,6 @@ try:
                   result='passed')
 finally:
     engine.stop()
+(ROOT / 'logs').mkdir(exist_ok=True)
 (ROOT / 'logs' / 'hardware-reliability.json').write_text(json.dumps(report, indent=2))
 print(json.dumps(report, indent=2))

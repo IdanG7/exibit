@@ -23,7 +23,7 @@ import sounddevice as sd
 import soundfile as sf
 from scipy.signal import resample_poly
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 RATE = 48000
 CONFIG = ROOT / 'config.json'
 MIN_FREE_BYTES = 64 * 1024 * 1024

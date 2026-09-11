@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from exhibit import Engine, gui, speaker_values, validate_speaker_settings
+from app.exhibit import Engine, gui, speaker_values, validate_speaker_settings
 
 
 class SpeakerSettingsTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class SpeakerSettingsTests(unittest.TestCase):
         timing = SimpleNamespace(currentTime=0, outputBufferDacTime=0)
         def render(name):
             block = np.empty((4, 2), dtype='float32')
-            with patch('exhibit.time.monotonic', return_value=100):
+            with patch('app.exhibit.time.monotonic', return_value=100):
                 callbacks[name](block, 4, timing, False)
             self.assertIsNone(engine.error)
             return block[:, 0]
@@ -48,7 +48,7 @@ class SpeakerSettingsTests(unittest.TestCase):
         first = engine._playback(source, 2, speaker='A')
         second = engine._playback(source, 2, speaker='B')
         timing = SimpleNamespace(outputBufferDacTime=0, currentTime=0)
-        with patch('exhibit.time.monotonic', return_value=100):
+        with patch('app.exhibit.time.monotonic', return_value=100):
             for callback, expected in [(first, .2), (second, .8)]:
                 block = np.empty((480, 2), dtype='float32')
                 callback(block, 480, timing, False)
@@ -121,11 +121,11 @@ class SpeakerSettingsTests(unittest.TestCase):
 
             root.after(20, exercise)
             root.after(120, finish)
-            with patch('tkinter.Tk', return_value=root), patch('exhibit.ROOT', folder), \
-                    patch('exhibit.load_gui_config', return_value=config), patch('exhibit.save_config'), \
-                    patch('exhibit.sd._initialize'), patch('exhibit.sd._terminate'), \
-                    patch('exhibit.devices', side_effect=lambda kind: [(0, {'name': 'mic' if kind == 'input' else 'A'})]), \
-                    patch('exhibit.Session', side_effect=make_session):
+            with patch('tkinter.Tk', return_value=root), patch('app.exhibit.ROOT', folder), \
+                    patch('app.exhibit.load_gui_config', return_value=config), patch('app.exhibit.save_config'), \
+                    patch('app.exhibit.sd._initialize'), patch('app.exhibit.sd._terminate'), \
+                    patch('app.exhibit.devices', side_effect=lambda kind: [(0, {'name': 'mic' if kind == 'input' else 'A'})]), \
+                    patch('app.exhibit.Session', side_effect=make_session):
                 gui()
             if failures:
                 raise failures[0]

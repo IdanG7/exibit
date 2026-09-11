@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 import soundfile as sf
 
-from exhibit import (DeviceUnavailable, Engine, Recorder, Session, load_gui_config,
+from app.exhibit import (DeviceUnavailable, Engine, Recorder, Session, load_gui_config,
                      load_playlist, save_config, validate_config, gui)
 
 
@@ -57,11 +57,11 @@ class ReliabilityTests(unittest.TestCase):
                 window.destroy()
 
             window.after(300, finish_window_test)
-            with patch('tkinter.Tk', return_value=window), patch('exhibit.ROOT', root_path), \
-                    patch('exhibit.load_gui_config', return_value=config), patch('exhibit.save_config'), \
-                    patch('exhibit.sd._terminate'), patch('exhibit.sd._initialize'), \
-                    patch('exhibit.devices', side_effect=lambda kind: [(0, {'name': 'mic' if kind == 'input' else 'speaker'})]), \
-                    patch('exhibit.Session', side_effect=[broken, healthy]), self.assertLogs(level='ERROR'):
+            with patch('tkinter.Tk', return_value=window), patch('app.exhibit.ROOT', root_path), \
+                    patch('app.exhibit.load_gui_config', return_value=config), patch('app.exhibit.save_config'), \
+                    patch('app.exhibit.sd._terminate'), patch('app.exhibit.sd._initialize'), \
+                    patch('app.exhibit.devices', side_effect=lambda kind: [(0, {'name': 'mic' if kind == 'input' else 'speaker'})]), \
+                    patch('app.exhibit.Session', side_effect=[broken, healthy]), self.assertLogs(level='ERROR'):
                 gui()
             self.assertEqual(outcomes, [True])
             self.assertGreater(healthy.tick.call_count, 1)
@@ -88,7 +88,7 @@ class ReliabilityTests(unittest.TestCase):
             track.touch()
             config = dict(microphone='mic', speakers=['speaker'], files=[str(track)], button_vk=13)
             path.write_text('{"previous": true}')
-            with patch('exhibit.os.fsync', side_effect=OSError('disk full')):
+            with patch('app.exhibit.os.fsync', side_effect=OSError('disk full')):
                 with self.assertRaises(OSError):
                     save_config(config, path)
             self.assertEqual(json.loads(path.read_text()), {'previous': True})
@@ -104,7 +104,7 @@ class ReliabilityTests(unittest.TestCase):
 
     def test_low_disk_blocks_recording_without_leaking_worker(self):
         with tempfile.TemporaryDirectory() as directory:
-            with patch('exhibit.shutil.disk_usage', return_value=SimpleNamespace(free=1)):
+            with patch('app.exhibit.shutil.disk_usage', return_value=SimpleNamespace(free=1)):
                 with self.assertRaisesRegex(OSError, '64 MB'):
                     Recorder(directory, 48000)
             self.assertEqual(list(Path(directory).iterdir()), [])
@@ -160,7 +160,7 @@ class ReliabilityTests(unittest.TestCase):
 
     def test_large_track_is_rejected_before_decoding(self):
         metadata = SimpleNamespace(frames=48000 * 60 * 60, samplerate=48000, channels=2)
-        with patch('exhibit.sf.info', return_value=metadata), patch('exhibit.sf.read') as read:
+        with patch('app.exhibit.sf.info', return_value=metadata), patch('app.exhibit.sf.read') as read:
             with self.assertRaisesRegex(ValueError, 'too large'):
                 load_playlist(['large.wav'])
             read.assert_not_called()
@@ -180,7 +180,7 @@ class ReliabilityTests(unittest.TestCase):
         engine.epoch = time.monotonic() - 1
         output = np.ones((480, 2), dtype='float32')
         callback = engine._playback(np.ones((960, 2), dtype='float32'), 2)
-        with patch('exhibit.loop_block', side_effect=RuntimeError('callback problem')):
+        with patch('app.exhibit.loop_block', side_effect=RuntimeError('callback problem')):
             callback(output, 480, SimpleNamespace(outputBufferDacTime=0, currentTime=0), False)
         self.assertIn('callback problem', engine.error)
         self.assertFalse(output.any())
@@ -194,8 +194,8 @@ class ReliabilityTests(unittest.TestCase):
             engine.stop()
         stream.close.assert_called_once()
 
-    @patch('exhibit.sd._initialize')
-    @patch('exhibit.sd._terminate')
+    @patch('app.exhibit.sd._initialize')
+    @patch('app.exhibit.sd._terminate')
     def test_disconnect_retries_and_stop_cancels_retry(self, terminate, initialize):
         first, second = Mock(), Mock()
         first.start.side_effect = DeviceUnavailable('unplugged')
@@ -221,8 +221,8 @@ class ReliabilityTests(unittest.TestCase):
         session.tick()
         self.assertEqual(factory.call_count, 2)
 
-    @patch('exhibit.sd._initialize')
-    @patch('exhibit.sd._terminate')
+    @patch('app.exhibit.sd._initialize')
+    @patch('app.exhibit.sd._terminate')
     def test_disk_error_does_not_restart_and_hide_recording_failure(self, terminate, initialize):
         engine = Mock()
         engine.recorder = SimpleNamespace(saved=0)

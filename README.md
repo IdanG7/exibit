@@ -93,3 +93,20 @@ Keep some free space on the laptop for recordings. If a power failure leaves a f
 - **Three different sounds:** Windows must show each speaker as a separate output. A simple audio splitter sends the same sound to every connected speaker.
 - **Run without a window:** after testing your setup, double-click **Start background.cmd** to run the saved settings. Double-click **Stop exhibit.cmd** to stop it. Use Start exhibit.cmd when you want to adjust settings.
 - **Move to another laptop:** this app needs Windows. Install Python 3.11 or newer, then double-click **Setup.cmd** with an internet connection. When setup finishes, open Start exhibit.cmd and select the devices on that laptop. Ask the person who supplied the app for help with this one-time setup if needed.
+
+## What the folders are for
+
+The Start, Stop, and Setup buttons stay beside this README so they are easy to find.
+
+| Folder | What's inside |
+| --- | --- |
+| **audio** | The files played through the speakers. |
+| **recordings** | Saved visitor recordings. |
+| **logs** | Information to share if you need help with a problem. |
+| **app** | The app itself. |
+| **setup** | Files used by the Setup button. |
+| **tests** | Checks used by the person maintaining the app. |
+| **tools** | Extra checks for microphones, speakers, and the button. |
+| **docs** | Notes for the person maintaining the app. |
+
+You normally only need the launch buttons, **audio**, and **recordings**. Leave **config.json** in place: it stores your saved settings.

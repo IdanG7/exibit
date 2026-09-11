@@ -5,8 +5,8 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from exhibit import Engine, validate_config, load_playlist
-import test_live_routing as routing_tests
+from app.exhibit import Engine, validate_config, load_playlist
+from tests import test_live_routing as routing_tests
 
 
 class PlaybackControlTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class PlaybackControlTests(unittest.TestCase):
 
         def render(frames):
             result = np.empty((frames, 2), dtype='float32')
-            with patch('exhibit.time.monotonic', return_value=100):
+            with patch('app.exhibit.time.monotonic', return_value=100):
                 callback(result, frames, timing, False)
             self.assertIsNone(engine.error)
             return result[:, 0]
@@ -64,9 +64,9 @@ class PlaybackControlTests(unittest.TestCase):
         config = dict(microphone='mic', speakers=[], files=[], button_vk=13)
         validate_config(config)
         self.assertEqual(load_playlist([], separate=True), [])
-        with patch('exhibit.resolve', return_value=(0, dict(default_samplerate=48000))), \
-                patch('exhibit.sd.check_input_settings'), patch('exhibit.Recorder') as recorder, \
-                patch('exhibit.sd.InputStream') as microphone, patch('exhibit.sd.OutputStream') as output:
+        with patch('app.exhibit.resolve', return_value=(0, dict(default_samplerate=48000))), \
+                patch('app.exhibit.sd.check_input_settings'), patch('app.exhibit.Recorder') as recorder, \
+                patch('app.exhibit.sd.InputStream') as microphone, patch('app.exhibit.sd.OutputStream') as output:
             engine = Engine(config)
             engine.start()
             try:

@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 import soundfile as sf
 
-from exhibit import load_playlist, normalize_playback
+from app.exhibit import load_playlist, normalize_playback
 
 
 class PlaybackLevelTests(unittest.TestCase):

@@ -1,7 +1,7 @@
 import tkinter as tk
 import unittest
 
-from exhibit import click_scale
+from app.exhibit import click_scale
 
 
 class SliderTests(unittest.TestCase):
